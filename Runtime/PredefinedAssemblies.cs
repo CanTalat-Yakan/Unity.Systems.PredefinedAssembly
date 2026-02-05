@@ -8,7 +8,7 @@ namespace UnityEssentials
     /// <summary>
     /// Utility class for working with predefined Unity assemblies and extracting types based on interface implementation.
     /// </summary>
-    public static class PredefinedAssemblyUtility
+    public static class PredefinedAssemblies
     {
         /// <summary>
         /// Enum representing commonly known Unity assemblies.
