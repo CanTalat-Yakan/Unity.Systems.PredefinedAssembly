@@ -1,5 +1,5 @@
 {
-    "name": "UnityEssentials.PredefinedAssemblies",
+    "name": "UnityEssentials.Systems.PredefinedAssembly",
     "rootNamespace": "UnityEssentials",
     "references": [],
     "includePlatforms": [],
