@@ -10,6 +10,8 @@ namespace UnityEssentials
     /// </summary>
     public static class PredefinedAssemblies
     {
+        public const BindingFlags DefaultMethodFlags = BindingFlags.Static | BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+        
         /// <summary>
         /// Enum representing commonly known Unity assemblies.
         /// </summary>
@@ -66,6 +68,61 @@ namespace UnityEssentials
         }
 
         /// <summary>
+        /// Returns loaded runtime assemblies.
+        /// 
+        /// Order:
+        /// 1) Known Unity script assemblies (Assembly-CSharp, Assembly-CSharp-firstpass)
+        /// 2) All other loaded assemblies (optionally including those with "Editor" in their name)
+        /// 
+        /// This is useful for reflection-based discovery systems that want consistent behavior
+        /// across projects with or without asmdefs.
+        /// </summary>
+        public static List<Assembly> GetRuntimeAssemblies(bool includeEditorAssemblies = false)
+        {
+            var result = new List<Assembly>(64);
+
+            var loaded = AppDomain.CurrentDomain.GetAssemblies();
+
+            // 1) Prefer "known" Unity script assemblies first.
+            var known = new[]
+            {
+                AssemblyType.AssemblyCSharp,
+                AssemblyType.AssemblyCSharpFirstPass,
+            };
+
+            for (var i = 0; i < loaded.Length; i++)
+            {
+                var asm = loaded[i];
+                if (asm == null) continue;
+                if (asm.IsDynamic) continue;
+
+                var asmName = asm.GetName().Name;
+                if (string.IsNullOrEmpty(asmName)) continue;
+
+                var asmType = GetAssemblyType(asmName);
+                if (asmType.HasValue && Array.IndexOf(known, asmType.Value) >= 0)
+                    result.Add(asm);
+            }
+
+            // 2) Add the rest (deduped), skipping Editor assemblies by heuristic.
+            for (var i = 0; i < loaded.Length; i++)
+            {
+                var asm = loaded[i];
+                if (asm == null) continue;
+                if (asm.IsDynamic) continue;
+
+                var name = asm.GetName().Name ?? string.Empty;
+                if (!includeEditorAssemblies && name.IndexOf("Editor", StringComparison.OrdinalIgnoreCase) >= 0)
+                    continue;
+
+                if (!result.Contains(asm))
+                    result.Add(asm);
+            }
+
+            return result;
+        }
+
+        /// <summary>
         /// Filters the provided assemblies and categorizes them by a custom AssemblyType enum.
         /// Only assemblies that can be classified with a known AssemblyType are included.
         /// </summary>
@@ -82,7 +139,7 @@ namespace UnityEssentials
                 var type = GetAssemblyType(assembly.GetName().Name);
                 if (!type.HasValue) continue;
 
-                var types = SafeGetTypes(assembly);
+                var types = SafeGetTypes(assembly).ToArray();
                 result[type.Value] = types;
             }
 
@@ -98,26 +155,122 @@ namespace UnityEssentials
 
                 var name = assembly.GetName().Name ?? string.Empty;
                 if (!includeEditorAssemblies)
-                {
                     // Heuristic: skip editor assemblies/packages.
                     if (name.IndexOf("Editor", StringComparison.OrdinalIgnoreCase) >= 0)
                         continue;
-                }
 
                 var asmTypes = SafeGetTypes(assembly);
-                AddTypesFromAssembly(asmTypes, types, interfaceType);
+                AddTypesFromAssembly(asmTypes as Type[] ?? asmTypes.ToArray(), types, interfaceType);
             }
         }
 
-        private static Type[] SafeGetTypes(Assembly assembly)
+        /// <summary>
+        /// Enumerates all loaded runtime types across the assemblies returned by <see cref="GetRuntimeAssemblies"/>.
+        /// </summary>
+        public static IEnumerable<Type> EnumerateRuntimeTypes(bool includeEditorAssemblies = false)
         {
+            var assemblies = GetRuntimeAssemblies(includeEditorAssemblies);
+            for (var i = 0; i < assemblies.Count; i++)
+            {
+                var asm = assemblies[i];
+                var types = SafeGetTypes(asm);
+                for (var j = 0; j < types.Count; j++)
+                    yield return types[j];
+            }
+        }
+
+        /// <summary>
+        /// Enumerates methods of all runtime types.
+        /// </summary>
+        public static IEnumerable<MethodInfo> EnumerateRuntimeMethods(
+            BindingFlags flags = DefaultMethodFlags,
+            bool includeEditorAssemblies = false)
+        {
+            foreach (var type in EnumerateRuntimeTypes(includeEditorAssemblies))
+            {
+                if (type == null)
+                    continue;
+
+                MethodInfo[] methods;
+                try { methods = type.GetMethods(flags); }
+                catch { continue; }
+
+                for (var i = 0; i < methods.Length; i++)
+                    yield return methods[i];
+            }
+        }
+        
+        /// <summary>
+        /// Enumerates runtime methods that have at least one <typeparamref name="TAttribute"/>.
+        /// </summary>
+        public static IEnumerable<MethodInfo> EnumerateRuntimeMethodsWithAttribute<TAttribute>(
+            BindingFlags flags = DefaultMethodFlags,
+            bool inherit = false,
+            bool includeEditorAssemblies = false)
+            where TAttribute : Attribute
+        {
+            foreach (var method in EnumerateRuntimeMethods(flags, includeEditorAssemblies))
+            {
+                if (method == null)
+                    continue;
+
+                var has = false;
+                try { has = method.IsDefined(typeof(TAttribute), inherit); }
+                catch { has = false; }
+
+                if (has)
+                    yield return method;
+            }
+        }
+
+        /// <summary>
+        /// Enumerates runtime methods and their <typeparamref name="TAttribute"/> instances.
+        /// 
+        /// Useful when your attribute allows multiple instances per method.
+        /// </summary>
+        public static IEnumerable<(MethodInfo Method, TAttribute Attribute)> EnumerateRuntimeMethodsWithAttributes<TAttribute>(
+            BindingFlags flags = DefaultMethodFlags,
+            bool inherit = false,
+            bool includeEditorAssemblies = false)
+            where TAttribute : Attribute
+        {
+            foreach (var method in EnumerateRuntimeMethods(flags, includeEditorAssemblies))
+            {
+                if (method == null)
+                    continue;
+
+                TAttribute[] attrs;
+                try { attrs = method.GetCustomAttributes<TAttribute>(inherit).ToArray(); }
+                catch { continue; }
+
+                for (var i = 0; i < attrs.Length; i++)
+                    yield return (method, attrs[i]);
+            }
+        }
+
+        /// <summary>
+        /// Safely returns all types from an assembly.
+        /// Never throws; returns an empty list if the assembly can't be inspected.
+        /// </summary>
+        public static IReadOnlyList<Type> SafeGetTypes(Assembly assembly)
+        {
+            if (assembly == null || assembly.IsDynamic)
+                return Array.Empty<Type>();
+
             try
             {
                 return assembly.GetTypes();
             }
             catch (ReflectionTypeLoadException e)
             {
+                if (e.Types == null)
+                    return Array.Empty<Type>();
+
                 return e.Types.Where(t => t != null).ToArray();
+            }
+            catch
+            {
+                return Array.Empty<Type>();
             }
         }
 
